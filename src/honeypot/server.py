@@ -3,7 +3,8 @@ import logging
 
 import asyncssh
 
-from honeypot.commands import HOSTNAME, respond
+from honeypot.commands import Shell
+from honeypot.filesystem import HONEYTOKEN_PASSWORD
 
 """ Se encarga de manejar la conexion SSH: logueo, shell interactiva y comandos directos. """
 
@@ -14,7 +15,6 @@ SERVER_VERSION = "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6"
 FAILED_ATTEMPTS_BEFORE_LOGIN = 1
 
 
-PROMPT = f"root@{HOSTNAME}:~# "
 WELCOME = (
     "Welcome to Ubuntu 22.04.2 LTS (GNU/Linux 5.15.0-105-generic x86_64)\r\n"
     "\r\n"
@@ -56,11 +56,15 @@ class HoneypotSSHServer(asyncssh.SSHServer):
             "Intento de login  | ip=%s | usuario=%s | contraseña=%s", self.ip, username, password
         )
 
+        if password == HONEYTOKEN_PASSWORD:
+            log.warning("🚨 HONEYTOKEN USADO | ip=%s | usuario=%s", self.ip, username)
+            return True
+
         if self.failed_attempts < FAILED_ATTEMPTS_BEFORE_LOGIN:
             self.failed_attempts += 1
             return False
 
-        log.info("Login exitoso | ip=%s | usuario=%s | contraseña=%s", self.ip, username, password)
+        log.info("Login exitoso | ip=%s | usuario=%s", self.ip, username)
         return True
 
 
@@ -68,11 +72,12 @@ class HoneypotSSHServer(asyncssh.SSHServer):
 async def handle_client(process: asyncssh.SSHServerProcess) -> None:
     """Maneja a sesion: lo que el atacante escribe despues de loguearse"""
     ip = process.get_extra_info("peername")[0]
+    shell = Shell()
 
     # caso 1: el atacante se loguea y escribe un comando (ssh root@honeypot "uname -a")
     if process.command:
         log.info("Comando directo | ip=%s | comando=%s", ip, process.command)
-        process.stdout.write(respond(process.command))
+        process.stdout.write(shell.respond(process.command))
         process.exit(0)
         return
 
@@ -80,7 +85,7 @@ async def handle_client(process: asyncssh.SSHServerProcess) -> None:
     process.stdout.write(WELCOME)
 
     while True:
-        process.stdout.write(PROMPT)
+        process.stdout.write(shell.prompt())
 
         try:
             # Espera a que el atacante escriba un comando y presione enter
@@ -106,7 +111,7 @@ async def handle_client(process: asyncssh.SSHServerProcess) -> None:
         if command in ("exit", "logout"):
             break
 
-        process.stdout.write(respond(command))
+        process.stdout.write(shell.respond(command))
 
     process.exit(0)
 
