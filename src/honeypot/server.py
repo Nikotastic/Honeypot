@@ -3,6 +3,10 @@ import logging
 
 import asyncssh
 
+from honeypot.commands import HOSTNAME, respond
+
+""" Se encarga de manejar la conexion SSH: logueo, shell interactiva y comandos directos. """
+
 HOST = "127.0.0.1"
 PORT = 2222
 HOST_KEY = "ssh_host_key"
@@ -10,7 +14,7 @@ SERVER_VERSION = "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6"
 FAILED_ATTEMPTS_BEFORE_LOGIN = 1
 
 
-PROMPT = "root@honeypot:~# "
+PROMPT = f"root@{HOSTNAME}:~# "
 WELCOME = (
     "Welcome to Ubuntu 22.04.2 LTS (GNU/Linux 5.15.0-105-generic x86_64)\r\n"
     "\r\n"
@@ -58,13 +62,6 @@ class HoneypotSSHServer(asyncssh.SSHServer):
 
         log.info("Login exitoso | ip=%s | usuario=%s | contraseña=%s", self.ip, username, password)
         return True
-
-
-# Metodos de manejo de sesion
-def respond(command: str) -> str:
-    """Devuelve la salida falsa de un comando"""
-    name = command.split()[0]
-    return f"{name}: command not found\r\n"
 
 
 # Maneja la sesion: lo que el atacante escribe despues de loguearse
