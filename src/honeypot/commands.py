@@ -1,4 +1,6 @@
-"""Respuestas falsas a comandos de un atacante"""
+"""Shell falsa: interpreta los comandos del atacante."""
+
+from honeypot.filesystem import HOME, Directory, FakeFilesystem, File
 
 HOSTNAME = "srv-prod-01"
 
@@ -9,67 +11,106 @@ EXACT = {
         "Mon Apr 15 09:52:04 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux"
     ),
     "uname -m": "x86_64",
-    "la -la": (
-        "total 32\n"
-        "drwx------  4 root root 4096 Oct 12 09:14 .\n"
-        "drwxr-xr-x 19 root root 4096 Mar  3  2024 ..\n"
-        "-rw-------  1 root root 1203 Nov 20 18:02 .bash_history\n"
-        "-rw-r--r--  1 root root 3106 Oct 15  2021 .bashrc\n"
-        "drwx------  2 root root 4096 Mar  3  2024 .ssh\n"
-        "-rwxr-xr-x  1 root root  412 Sep 28 11:40 backup.sh\n"
-        "-rw-r--r--  1 root root  221 Oct 12 09:14 notes.txt"
-    ),
-    "cat /etc/passwd": (
-        "root:x:0:0:root:/root:/bin/bash\n"
-        "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
-        "www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\n"
-        "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash"
-    ),
 }
 
 # Comando que se respionde segun el nombre, sin importar los argumentos
 BY_NAME = {
     "whoami": "root",
     "id": "uid=0(root) gid=0(root) groups=0(root)",
-    "pwd": "/root",
     "hostname": HOSTNAME,
     "uname": "Linux",
-    "ls": "backup.sh  notes.txt",
     "nproc": "4",
     "uptime": " 14:32:01 up 47 days,  3:12,  1 user,  load average: 0.08, 0.03, 0.01",
 }
 
 # Comando que en un linux real no imprime nada
-SILENT = {"cd", "export", "unset", "clear", "history"}
+SILENT = {"export", "unset", "clear", "history"}
 
 
-def run_one(command: str) -> str:
-    """Responde un solo comando y devuelve su salida, sin saltos de terminal"""
-    if command in EXACT:
-        return EXACT[command]
+class Shell:
+    """Una shell por sesion: cada atacante tiene su propia shell, con su propio directorio de trabajo y variables de entorno."""
 
-    name, _, args = command.partition(" ")
+    def __init__(self) -> None:
+        self.fs = FakeFilesystem()
+        self.cwd = HOME
 
-    if name == "echo":
-        return args.strip("\"'")
-    if name in BY_NAME:
-        return BY_NAME[name]
-    if name in SILENT:
+    def prompt(self) -> str:
+        if self.cwd == HOME:
+            location = "~"
+        elif self.cwd.startswith(HOME + "/"):
+            location = "~" + self.cwd[len(HOME) :]
+        else:
+            location = self.cwd
+        return f"root@{HOSTNAME}:{location}# "
+
+    def respond(self, line: str) -> str:
+        """Responde una línea completa, que puede traer varios comandos separados por ';'."""
+        outputs = []
+        for command in line.split(";"):
+            command = command.strip()
+            if command:
+                output = self.run_one(command)
+                if output:
+                    outputs.append(output)
+
+        if not outputs:
+            return ""
+        return "\n".join(outputs).replace("\n", "\r\n") + "\r\n"
+
+    def run_one(self, command: str) -> str:
+        if command in EXACT:
+            return EXACT[command]
+
+        name, _, args = command.partition(" ")
+        args = args.strip()
+
+        handlers = {"cd": self.cd, "pwd": self.pwd, "ls": self.ls, "cat": self.cat}
+        if name in handlers:
+            return handlers[name](args)
+        if name == "echo":
+            return args.strip("\"'")
+        if name in BY_NAME:
+            return BY_NAME[name]
+        if name in SILENT:
+            return ""
+        return f"-bash: {name}: command not found"
+
+    def pwd(self, args: str) -> str:
+        return self.cwd
+
+    def cd(self, args: str) -> str:
+        path = self.fs.resolve(self.cwd, args)
+        node = self.fs.get(path)
+        if node is None:
+            return f"-bash: cd: {args}: No such file or directory"
+        if isinstance(node, File):
+            return f"-bash: cd: {args}: Not a directory"
+        self.cwd = path
         return ""
-    return f"-bash: {name}: command not found"
 
+    def ls(self, args: str) -> str:
+        parts = args.split()
+        flags = "".join(p[1:] for p in parts if p.startswith("-"))
+        paths = [p for p in parts if not p.startswith("-")]
+        target = paths[0] if paths else "."
 
-#
-def respond(line: str) -> str:
-    """Responde una línea completa, que puede traer varios comandos separados por ';'."""
-    outputs = []
-    for command in line.split(";"):
-        command = command.strip()
-        if command:
-            output = run_one(command)
-            if output:
-                outputs.append(output)
+        node = self.fs.get(self.fs.resolve(self.cwd, target))
+        if node is None:
+            return f"ls: cannot access '{target}': No such file or directory"
+        if isinstance(node, File):
+            return target
 
-    if not outputs:
-        return ""
-    return "\r\n".join(outputs).replace("\n", "\r\n").replace("\r\r\n", "\r\n") + "\r\n"
+        names = sorted(node.children)
+        if "a" not in flags:
+            names = [n for n in names if not n.startswith(".")]
+        return "  ".join(names)
+
+    def cat(self, args: str) -> str:
+        if not args:
+            return ""
+        node = self.fs.get(self.fs.resolve(self.cwd, args))
+        if node is None:
+            return f"cat: {args}: No such file or directory"
+        if isinstance(node, Directory):
+            return f"cat: {args}: Is a directory"
+        return node.content.rstrip("\n")
